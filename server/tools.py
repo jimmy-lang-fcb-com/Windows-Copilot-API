@@ -40,25 +40,36 @@ OPEN, CLOSE = "<tool_call>", "</tool_call>"
 # first of these so a tool call is never sent to the client as plain text.
 STREAM_MARKERS = ("<tool_call", "&lt;tool_call", "```")
 
+# Rules repeated with every message: M365 Copilot drifts from instructions
+# given only once, and tends to (a) use its own cloud tools, e.g. code
+# interpreter, and believe the user's machine changed, or (b) claim it did
+# something without calling a tool.
+_RULES = """Rules for tools:
+- Only tool calls act on the user's computer. Your built-in abilities (code interpreter, \
+file creation, web or work search) run in Microsoft's cloud and cannot see or change the \
+user's files.
+- When the user asks you to do something on their computer (create, edit, run, install, \
+list, read), do it with tool calls. Don't just tell them what to run.
+- Never say you created, changed, or ran something unless a <tool_result> in this \
+conversation shows it succeeded.
+- Format: <tool_call>{"name": "TOOL_NAME", "arguments": {...}}</tool_call> with valid JSON \
+and every required argument. Not inside a code block.
+- After your tool calls, stop and wait for the results. Bigger tasks take several rounds \
+of tool calls; keep going until the task is done.
+- If no tool is needed, answer normally with no <tool_call> block."""
+
 _INSTRUCTIONS = """# Tools
 
-You can use tools that run on the user's computer. You cannot run them yourself. \
-To use one, reply with a tool call; the user's system runs it and sends you the result \
-in a <tool_result> block.
+You are working on the user's computer through tools. You can't run them yourself: \
+reply with a tool call, the user's system runs it, and the result comes back in a \
+<tool_result> block.
 
 To call a tool, reply with one or more blocks in exactly this format:
 <tool_call>{"name": "TOOL_NAME", "arguments": {"param": "value"}}</tool_call>
 
-Rules:
-- "arguments" must be valid JSON matching the tool's parameters. Include every required parameter.
-- Put nothing after your tool calls; stop and wait for the results.
-- Don't put tool calls in code blocks, and don't describe a call instead of making it.
-- If no tool is needed, answer normally with no <tool_call> block.
-- For the user's local files, code, or commands, use these tools rather than search.
+""" + _RULES
 
-Available tools:"""
-
-_REMINDER = ("(To use a tool, reply only with <tool_call> blocks. "
+_REMINDER = ("(To act on the user's computer, reply only with <tool_call> blocks. "
              "Otherwise, answer directly.)")
 
 
@@ -140,6 +151,57 @@ def _render_message(m: ChatMessage, call_names: Dict[str, str]) -> str:
     return f"{m.role.capitalize()}: {text}"
 
 
+def _example(tools: List[Dict[str, Any]]) -> str:
+    """A short worked example using a real tool, if a suitable one exists.
+
+    Models follow a format far more reliably with one example than with rules
+    alone. Prefers a shell tool, then a file-reading tool.
+    """
+    fns = [t.get("function", t) for t in tools]
+
+    def required(fn):
+        return set((fn.get("parameters") or {}).get("required") or [])
+
+    def props(fn):
+        return set(((fn.get("parameters") or {}).get("properties") or {}))
+
+    for fn in fns:
+        if "command" in props(fn) and required(fn) <= {"command", "description"}:
+            args = {"command": "ls"}
+            if "description" in props(fn):
+                args["description"] = "List files in the current folder"
+            result = "README.md\nsrc"
+            answer = "This folder contains README.md and a src folder."
+            break
+    else:
+        for fn in fns:
+            path = next((p for p in ("filePath", "file_path", "path") if p in props(fn)), None)
+            if path and "read" in fn.get("name", "").lower() and required(fn) <= {path}:
+                args = {path: "README.md"}
+                result = "# My project\nA small demo app."
+                answer = "README.md describes a small demo app called My project."
+                break
+        else:
+            return ""
+    name = fn["name"]
+    return (
+        "Example:\n"
+        "User: what's in this folder?\n"
+        f"Assistant: {OPEN}{json.dumps({'name': name, 'arguments': args})}{CLOSE}\n"
+        f'<tool_result name="{name}" id="call_1">\n{result}\n</tool_result>\n'
+        f"Assistant: {answer}"
+    )
+
+
+def _signature(tool: Dict[str, Any]) -> str:
+    """Compact form for reminders: ``name(required, optional?)``."""
+    fn = tool.get("function", tool)
+    params = fn.get("parameters") or {}
+    required = params.get("required") or []
+    optional = [p for p in (params.get("properties") or {}) if p not in required]
+    return f"{fn.get('name')}({', '.join(list(required) + [p + '?' for p in optional])})"
+
+
 def build_prompt(
     messages: List[ChatMessage],
     tools: List[Dict[str, Any]],
@@ -148,7 +210,11 @@ def build_prompt(
     """Flatten a tool-using conversation into one M365 Copilot prompt."""
     system = "\n\n".join(content_text(m.content) for m in messages
                          if m.role in ("system", "developer") and m.content)
-    tool_section = _INSTRUCTIONS + "\n" + "\n".join(describe_tool(t) for t in tools)
+    tool_section = (_INSTRUCTIONS + "\n\nAvailable tools:\n"
+                    + "\n".join(describe_tool(t) for t in tools))
+    example = _example(tools)
+    if example:
+        tool_section += "\n\n" + example
     tool_section += _choice_rule(tool_choice)
 
     call_names = _call_names(messages)
@@ -180,16 +246,16 @@ def build_followup(messages: List[ChatMessage], start: int, tools: List[Dict[str
                    tool_choice: Any = None) -> str:
     """Prompt for a *continued* M365 conversation: only ``messages[start:]``.
 
-    The tool instructions were sent at the start of the conversation, so this
-    only repeats a one-line reminder with the tool names.
+    The full tool descriptions were sent at the start of the conversation; this
+    repeats the rules and a compact tool list, after the new messages, so they
+    stay in force as the conversation grows.
     """
     call_names = _call_names(messages)
     parts = [_render_message(m, call_names) for m in messages[start:]
              if m.role not in ("system", "developer")]
-    names = ", ".join((t.get("function", t) or {}).get("name", "") for t in tools)
-    return ("\n\n".join(parts) + _choice_rule(tool_choice)
-            + f"\n\n(Tools available: {names}. To use one, reply only with <tool_call> blocks. "
-              "Otherwise, answer directly.)")
+    signatures = "\n".join(_signature(t) for t in tools)
+    return ("\n\n".join(parts)
+            + f"\n\n---\n{_RULES}\nTools:\n{signatures}" + _choice_rule(tool_choice))
 
 
 def correction_prompt(error: str) -> str:

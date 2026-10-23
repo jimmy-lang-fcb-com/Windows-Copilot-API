@@ -52,6 +52,21 @@ class PromptTests(unittest.TestCase):
         self.assertTrue(prompt.endswith("Assistant:"))
         self.assertLess(len(prompt), 2500)  # the 2,000-char description was trimmed
 
+    def test_example_uses_a_real_shell_tool(self):
+        opencode_bash = {"type": "function", "function": {
+            "name": "bash", "description": "Run a command",
+            "parameters": {"type": "object", "required": ["command", "description"], "properties": {
+                "command": {"type": "string"}, "description": {"type": "string"},
+                "timeout": {"type": "number"}}}}}
+        prompt = build_prompt([ChatMessage(role="user", content="x")], [opencode_bash])
+        self.assertIn('<tool_call>{"name": "bash", "arguments": {"command": "ls", '
+                      '"description": "List files in the current folder"}}</tool_call>', prompt)
+        self.assertIn("Never say you created", prompt)
+        # No suitable tool: no example rather than a misleading one.
+        odd = {"type": "function", "function": {"name": "todo", "parameters": {
+            "type": "object", "required": ["items"], "properties": {"items": {"type": "array"}}}}}
+        self.assertNotIn("Example:", build_prompt([ChatMessage(role="user", content="x")], [odd]))
+
     def test_required_choice(self):
         prompt = build_prompt([ChatMessage(role="user", content="x")], TOOLS, "required")
         self.assertIn("You must call at least one tool", prompt)

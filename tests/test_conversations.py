@@ -77,7 +77,8 @@ class ReuseTests(unittest.TestCase):
         self.assertIn('<tool_result name="bash"', prompt)
         self.assertNotIn("# Tools", prompt)          # instructions not resent
         self.assertNotIn("list files", prompt)       # old history not resent
-        self.assertIn("Tools available: read_file, bash", prompt)
+        self.assertIn("read_file(path, limit?, mode?)", prompt)   # compact tool list
+        self.assertIn("Never say you created", prompt)           # rules repeated
 
     def test_plain_chat_sends_only_new_message(self):
         fake = ScriptedClient("Hello!", "Sure, more.")
