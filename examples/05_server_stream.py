@@ -16,11 +16,12 @@ choices[0].delta.content, the conversation_id arrives on the final chunk, and
 the stream ends with `data: [DONE]`.
 """
 
+import os
 import json
 
 import requests
 
-URL = "http://localhost:8000/v1/chat/completions"
+URL = f"http://localhost:{os.environ.get('PORT', '8000')}/v1/chat/completions"
 
 with requests.post(URL, json={
     "model": "m365-copilot",

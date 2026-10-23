@@ -15,9 +15,10 @@ Each response includes Copilot's `conversation_id` as an extra field; send it
 back to continue the same thread.
 """
 
+import os
 import requests
 
-URL = "http://localhost:8000/v1/chat/completions"
+URL = f"http://localhost:{os.environ.get('PORT', '8000')}/v1/chat/completions"
 
 # Turn 1 — new conversation.
 first = requests.post(URL, json={

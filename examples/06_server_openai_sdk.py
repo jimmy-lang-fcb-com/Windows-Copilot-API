@@ -16,10 +16,12 @@ Then run this from the project root:
     python examples/06_server_openai_sdk.py
 """
 
+import os
+
 from openai import OpenAI
 
 # Point base_url at the server. api_key is required by the SDK but ignored here.
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+client = OpenAI(base_url=f"http://localhost:{os.environ.get('PORT', '8000')}/v1", api_key="unused")
 
 completion = client.chat.completions.create(
     model="m365-copilot",
