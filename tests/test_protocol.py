@@ -123,6 +123,18 @@ class RequestTests(unittest.TestCase):
         self.assertIn(f"ClientRequestId={new_id}", new_url)
         self.assertEqual(args["threadId"], "conv-9")
 
+    def test_build_turn_url_conversation_matches_body(self):
+        # Seen live: the URL carried ConversationId from another socket than the
+        # captured request, and M365 answered InvalidRequest until they matched.
+        url = URL + "&ConversationId=other-socket-conv-0001&chatsessionid=old-req-0001"
+        new_url, out = build_turn(TEMPLATE, url, "NEW", "p", "conv-9", start_of_session=True)
+        args = json.loads(out[:-1])["arguments"][0]
+        self.assertIn("ConversationId=conv-9", new_url)
+        self.assertNotIn("other-socket-conv", new_url)
+        self.assertEqual(args["conversationId"], "conv-9")
+        # chatsessionid shared the body's requestId, so it gets the same new value.
+        self.assertIn(f"chatsessionid={args['message']['requestId']}", new_url)
+
     def test_build_turn_url_swaps_token_and_request_id(self):
         self.assertEqual(token_from_url(URL), "OLD")
         new, _ = build_turn(TEMPLATE, URL, "NEW", "p", "c", start_of_session=True)

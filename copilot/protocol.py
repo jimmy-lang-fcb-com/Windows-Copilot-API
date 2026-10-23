@@ -196,24 +196,37 @@ def build_turn(
     Returns ``(url, wire_text)``. Ids are swapped *consistently*: each old id
     (the conversation id, every per-turn id in the body, and the URL's
     ClientRequestId) maps to one new value, replaced everywhere it appears. The
-    page often reuses one id in several places (body and URL), and the service
-    may check that they agree.
+    page reuses one id in several places (e.g. ``clientrequestid`` and
+    ``chatsessionid`` in the URL match ``requestId``/``traceId`` in the body), and
+    the service rejects a turn whose ids disagree.
+
+    The socket URL also carries a ``ConversationId`` of its own, which must match
+    the body's ``conversationId`` or the service answers ``InvalidRequest``. The
+    captured URL may come from a different socket than the captured request, so
+    both conversation ids map to ``conversation_id``.
     """
     args = template["arguments"][0]
+    parts = urlparse(captured_url)
+    captured_query = parse_qsl(parts.query, keep_blank_values=True)
+
     mapping: Dict[str, str] = {}
-    old_conversation = args.get("conversationId")
-    if isinstance(old_conversation, str) and old_conversation:
-        mapping[old_conversation] = conversation_id
+    old_conversations = [args.get("conversationId")] + [
+        value for key, value in captured_query if key.lower() == "conversationid"
+    ]
+    for old in old_conversations:
+        if isinstance(old, str) and old:
+            mapping[old] = conversation_id
     for old in _per_turn_ids(template):
         mapping.setdefault(old, str(uuid.uuid4()))
 
     # URL: fresh token; ClientRequestId follows the mapping when the body uses it.
-    parts = urlparse(captured_url)
     query = []
-    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+    for key, value in captured_query:
         low = key.lower()
         if low in ("access_token", "accesstoken"):
             value = access_token
+        elif low == "conversationid":
+            value = conversation_id
         elif low == "clientrequestid":
             value = _lookup(mapping, value) or mapping.setdefault(value, str(uuid.uuid4()))
         else:
