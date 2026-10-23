@@ -1,4 +1,4 @@
-"""OpenAI-compatible HTTP server for Microsoft Copilot.
+"""OpenAI-compatible HTTP server for Microsoft 365 Copilot.
 
 Start it:
 
@@ -27,27 +27,27 @@ from .api import app as _api
 def app(host=None, port=None) -> None:
     """Start the server (blocks while uvicorn runs).
 
-    On first run (no saved session) this opens a browser for interactive sign-in
+    On first run (never signed in) this opens a browser for interactive sign-in
     before serving, so requests don't fail with a "not signed in" error.
     """
     import uvicorn
 
-    from copilot.auth import load_auth
+    from copilot.auth import signed_in_before
 
     if host is None:
         host = os.environ.get("HOST", "127.0.0.1")
     if port is None:
         port = int(os.environ.get("PORT", "8000"))
 
-    # Ensure a signed-in Copilot session exists before we start serving. On the
-    # very first run this triggers the interactive browser sign-in (instead of
-    # letting the first HTTP request fail), then caches it for reuse.
-    try:
-        load_auth()
-    except Exception as exc:
-        print(f"Warning: could not establish a Copilot session: {exc}")
+    if not signed_in_before():
+        try:
+            from copilot.browser import login
 
-    print(f"Copilot OpenAI-compatible API on http://{host}:{port}  (POST /v1/chat/completions)")
+            login()
+        except Exception as exc:
+            print(f"Warning: could not sign in to M365 Copilot: {exc}")
+
+    print(f"M365 Copilot OpenAI-compatible API on http://{host}:{port}  (POST /v1/chat/completions)")
     uvicorn.run(_api, host=host, port=port)
 
 

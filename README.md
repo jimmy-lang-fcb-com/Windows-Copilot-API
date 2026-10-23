@@ -1,147 +1,96 @@
+# M365 Copilot API: an OpenAI-compatible bridge to Microsoft 365 Copilot
 
-
-# Windows Copilot API: a free LLM API powered by Microsoft Copilot
-
-![Windows Copilot API — a free, OpenAI-compatible API for your Microsoft Copilot account](assets/windows-copilot-api-banner.png)
-
-**Using your own Microsoft Copilot account.** No API key, no credits, no paid plan: it turns the free chat at [copilot.microsoft.com](https://copilot.microsoft.com) into an API you can call from code.
+**Proof of concept for IT.** It signs in to the Microsoft 365 Copilot web app
+([m365.cloud.microsoft/chat](https://m365.cloud.microsoft/chat)) as *your* work
+account and exposes it as an API you can call from code. It doesn't use the
+official Graph Copilot Chat API. Instead it automates the same web app you use in
+the browser, so it follows your account's licence, permissions, and tenant
+policies.
 
 You can use it in two ways:
 
-- 🐍 **As a Python library:** just call `client.chat("Hi")`. Supports streaming and multi-turn conversations.
-- 🔌 **As a local OpenAI-compatible API:** runs a server at `http://localhost:8000/v1` that speaks the OpenAI format, so the official `openai` SDK (and any OpenAI-compatible app) works as a drop-in, with `localhost` in place of OpenAI.
+- 🐍 **As a Python library:** `client.chat("Hi")`, with streaming and multi-turn conversations.
+- 🔌 **As a local OpenAI-compatible API:** a server at `http://localhost:8000/v1` that speaks the OpenAI format, so the `openai` SDK and OpenAI-compatible tools work against it.
 
-You sign in once in a browser with your Microsoft **or Google** account; your session is saved and refreshed automatically after that.
-
-> **Unofficial project.** Not affiliated with or endorsed by Microsoft. It automates the consumer Copilot web experience for personal use, so use it responsibly and within Microsoft's terms.
-
----
-
-## Table of contents
-
-- [Why use this?](#why-use-this)
-- [Requirements](#requirements)
-- [Setup (2 minutes)](#setup-2-minutes)
-- [Run with Docker (optional)](#run-with-docker-optional)
-- [Usage 1: In Python (no server)](#usage-1-in-python-no-server)
-- [Usage 2: As an OpenAI-compatible server](#usage-2-as-an-openai-compatible-server)
-- [Command line](#command-line)
-- [Concurrency & stress test](#concurrency--stress-test)
-- [Rate limiting](#rate-limiting)
-- [Project layout](#project-layout)
-- [Notes & limitations](#notes--limitations)
-- [Troubleshooting](#troubleshooting)
-- [Collaboration & support](#collaboration--support)
-- [License](#license)
-- [Star History](#star-history)
+> **Unofficial.** Not affiliated with or endorsed by Microsoft. It drives the
+> M365 Copilot web app with your own credentials. Check with your tenant's
+> security/compliance owners before running it anywhere but your own machine.
 
 ---
 
-## Why use this?
+## How it works
 
-- **Free:** uses your normal signed-in Copilot, no API billing.
-- **Drop-in OpenAI replacement:** point any OpenAI client at `localhost` and it just works.
-- **Works everywhere you're signed in:** the signed-in path works even in regions where *anonymous* Copilot is blocked (e.g. India).
-- **Streaming + conversations:** token-by-token output and multi-turn threads addressed by `conversation_id`.
+1. **Sign in once** (`python -m copilot login`). A real Chromium window opens on
+   M365 Copilot and you sign in with your work account and MFA. The browser
+   profile is saved under `session/profile/`, so later runs stay signed in.
+2. **Capture.** After sign-in the bridge sends one warm-up message. It records the
+   page's own chat WebSocket (`substrate.office.com/m365Copilot/Chathub/...`):
+   the URL with its access token, plus the exact `chat` request the page sent.
+   Both are saved to `session/token.json`.
+3. **Chat**, in one of two modes:
+
+| Mode | How | Pros | Cons |
+| --- | --- | --- | --- |
+| `browser` (default) | A headless browser types your prompt into the real page and reads the reply off its chat socket. | Most robust: the page builds every request itself. | Slower (~1 tab per conversation); conversations last only while the process runs. |
+| `direct` (experimental) | Replays the captured request over a plain WebSocket with your prompt swapped in. No browser per turn. | Fast, light; conversations resume by id across restarts. | Works only while M365 accepts the captured request shape; refreshing the token (≈ hourly) re-opens a headless browser and sends a warm-up message. |
+
+Pick a mode with `COPILOT_MODE=browser|direct` or `CopilotClient(mode=...)`.
+
+The protocol is SignalR over a WebSocket. Reply text arrives in cumulative
+`update` frames, which [copilot/protocol.py](copilot/protocol.py) turns into
+streamed deltas.
 
 ---
 
 ## Requirements
 
 - **Python 3.9+**
-- A **Microsoft account** (the free one you use for Copilot is fine)
-- Works on Windows, macOS, and Linux
+- A work account with a **Microsoft 365 Copilot** licence (Copilot Chat in the M365 app)
+- macOS, Windows, or Linux with a display for the first sign-in
 
 ---
 
-## Setup (2 minutes)
-
-```bash
-# 1. Clone the project
-git clone <your-repo-url>
-cd Windows-Copilot-API
-```
-
-**2. Create and activate a virtual environment**
-
-On **macOS / Linux**:
+## Setup
 
 ```bash
 python3 -m venv venv
-source venv/bin/activate
-```
+source venv/bin/activate            # Windows: venv\Scripts\Activate.ps1
 
-On **Windows** (PowerShell):
-
-```powershell
-python -m venv venv
-venv\Scripts\Activate.ps1
-```
-
-> On Windows you may need to allow script execution once: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. In `cmd.exe` activate with `venv\Scripts\activate.bat` instead.
-
-**3. Install dependencies and sign in**
-
-```bash
-# Install dependencies
 pip install -r requirements.txt
-
-# Install the browser Playwright needs (one-time)
 playwright install chromium
 
-# Sign in once: a browser opens, log into your Microsoft or Google account
-python -m copilot login
+python -m copilot login             # sign in with your work account (+ MFA)
+python -m copilot ask "What meetings do I have tomorrow?"
 ```
 
-The browser **closes by itself** once sign-in is detected — you don't need to press Enter or close it manually. After sign-in it sends one short warm-up message that mints the chat token **and** passes Cloudflare's "verify you're human" check in the same step (a brief "finishing setup…" appears, and a tiny throwaway chat lands in your history). If a checkbox shows up, click it in that login window. The steps are logged to `session/login.log` if anything goes wrong. That's it: your session is saved under `session/` (git-ignored, never shared) and reused on every run — so your first request works right away.
-
-> 🛠️ **Run into trouble during setup or your first run?** Head to the [Troubleshooting](#troubleshooting) section, the bundled diagnostic both *fixes* common issues (captcha/clearance) and *logs* a shareable report.
-
----
-
-## Run with Docker (optional)
-
-Prefer a container? You can run the OpenAI-compatible server in Docker once you've signed in.
-
-> **Sign in on the host first.** The login step above opens a *visible* browser, which can't run inside the headless container — so run `python -m copilot login` on your host to populate `session/`. The container mounts that folder and reuses the Cloudflare clearance earned on the host. It refreshes the chat token headlessly, but it can't earn *fresh* clearance without a visible browser, so when clearance expires (~30 min) it returns a `503` — re-run `python -m copilot login` on the host to refresh `session/`.
-
-```bash
-docker compose up --build
-# -> Copilot OpenAI-compatible API on http://localhost:8000
-```
-
-The [docker-compose.yml](docker-compose.yml) maps port `8000` and bind-mounts your `session/` so the login persists across restarts. Tune `RATE_LIMIT_RPM` / `RATE_LIMIT_BURST` there. To run without Compose, build and pass the same bindings by hand:
-
-```bash
-docker build -t windows-copilot-api .
-docker run --rm -p 8000:8000 -v "$(pwd)/session:/app/session" windows-copilot-api
-```
+`login` continues by itself once the chat box appears. The warm-up message
+("Reply with the single word: ready") shows up in your Copilot history.
 
 ---
 
 ## Usage 1: In Python (no server)
 
-The simplest way if your code is already Python.
-
 ```python
 from copilot import CopilotClient
 
-client = CopilotClient()                 # loads your signed-in session
+client = CopilotClient()                 # browser mode; CopilotClient(mode="direct") for direct
 
-# Get a full reply
-reply = client.chat("Say hello in one short sentence.")
+reply = client.chat("Summarize the last email from my manager.")
 print(reply.text)
 
 # Continue the SAME conversation — pass the id back
-reply2 = client.chat("And now in French?", reply.conversation_id)
+reply2 = client.chat("Draft a short reply.", reply.conversation_id)
 print(reply2.text)
 
-# Stream the answer as it's typed
+# Stream the answer as it arrives
 for chunk in client.stream("Tell me a short joke"):
     print(chunk, end="", flush=True)
+
+client.close()
 ```
 
-`chat()` returns the full text plus a `conversation_id`; pass that id back to keep the thread going, or omit it to start fresh. `stream()` yields the reply piece by piece.
+Pass `headless=False` to watch the browser work. Errors raise
+`copilot.CopilotError`; a signed-out session raises `copilot.AuthRequired`.
 
 👉 More: [examples/01_direct_chat.py](examples/01_direct_chat.py), [02_direct_conversation.py](examples/02_direct_conversation.py), [03_direct_stream.py](examples/03_direct_stream.py)
 
@@ -153,7 +102,7 @@ Start a local server that speaks the OpenAI API, so existing OpenAI tools and SD
 
 ```bash
 python app.py
-# -> Copilot OpenAI-compatible API on http://127.0.0.1:8000
+# -> M365 Copilot OpenAI-compatible API on http://127.0.0.1:8000
 ```
 
 Then point any OpenAI client at it (the API key is required by the SDK but ignored):
@@ -164,7 +113,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
 
 resp = client.chat.completions.create(
-    model="copilot",
+    model="m365-copilot",
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(resp.choices[0].message.content)
@@ -183,7 +132,7 @@ curl http://localhost:8000/v1/chat/completions \
 | Method | Path | Description |
 | --- | --- | --- |
 | `POST` | `/v1/chat/completions` | Chat (supports `"stream": true` and an optional `"conversation_id"`) |
-| `GET`  | `/v1/models` | Lists the single `copilot` model |
+| `GET`  | `/v1/models` | Lists the single `m365-copilot` model |
 
 > Change the address with env vars: `HOST=0.0.0.0 PORT=8080 python app.py`, or run `uvicorn server.api:app --host 0.0.0.0 --port 8080`.
 
@@ -194,40 +143,47 @@ curl http://localhost:8000/v1/chat/completions \
 ## Command line
 
 ```bash
-python -m copilot login          # sign in and save the session
-python -m copilot ask "Hello!"   # quick one-shot question
+python -m copilot login                  # sign in and capture the chat session
+python -m copilot ask "Hello!"           # one-shot question (browser mode)
+python -m copilot ask --direct "Hello!"  # same, via direct mode
+python -m copilot ask --show "Hello!"    # browser mode with a visible window
 ```
 
 ---
 
-## Cloudflare clearance (automatic)
+## Configuration
 
-Copilot's chat sits behind Cloudflare. Access needs a `cf_clearance` cookie,
-earned by passing a "verify you're human" check in a real browser, and it lasts
-about half an hour. The bridge handles this for you:
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `COPILOT_MODE` | `browser` | `browser` or `direct` |
+| `M365_COPILOT_URL` | `https://m365.cloud.microsoft/chat` | Chat page to open |
+| `M365_CHATHUB_HINT` | `chathub` | Substring that identifies the chat WebSocket URL |
+| `M365_COMPOSER_SELECTORS` | (see [copilot/config.py](copilot/config.py)) | Comma-separated CSS selectors for the chat box |
+| `M365_WARMUP_PROMPT` | `Reply with the single word: ready` | Message used to capture the session |
+| `M365_SESSION_DIR` | `session` | Where the profile and token live |
+| `HOST` / `PORT` | `127.0.0.1` / `8000` | Server address |
+| `RATE_LIMIT_RPM` / `RATE_LIMIT_BURST` | `12` / `4` | Server rate limit |
 
-- **At sign-in:** `python -m copilot login` earns clearance as part of the same
-  warm-up that mints your token, so your first request works immediately. If
-  Cloudflare shows a checkbox, click it in the login window.
-- **When it expires:** if a later request hits the gate, the bridge opens a
-  browser, passes the check (the checkbox is clicked automatically, or you click
-  it if one appears), and retries the request for you. You'll see a short
-  `[copilot] clearance: …` progress log, then the answer.
+---
 
-On a trusted connection the check often passes invisibly with no window at all. A
-datacenter/VPN IP is stricter and more likely to show the checkbox; a residential
-connection clears most reliably.
+## Run with Docker (optional)
 
-The **server** never opens a window: when clearance expires it returns a `503`
-(`type: "clearance_required"`). Re-clear out of band with `python -m copilot
-login`, then retry.
+```bash
+docker compose up --build
+```
+
+The container mounts `session/` and runs headless, so sign in on the host first.
+**Sign in on a Linux host:** Chromium encrypts a profile's cookies with an
+OS-specific key, so a profile created on macOS or Windows looks signed out
+inside the container. When the session expires the server answers `503`
+(`type: "auth_required"`); sign in again and restart.
 
 ---
 
 ## Concurrency & stress test
 
-The server bridges a **single** signed-in Copilot account, and Copilot's chat
-socket doesn't tolerate concurrent conversations from one process. So the server
+The server bridges a **single** signed-in M365 Copilot account (and, in browser
+mode, a single browser). So the server
 **serializes** upstream calls: parallel HTTP requests queue behind a lock and run
 one at a time (see [server/api.py](server/api.py)). This is intentional, and it
 means throughput is sequential, not parallel.
@@ -245,7 +201,7 @@ python tests/stress.py
 python tests/stress.py --max 64 --timeout 120 --url http://localhost:8000
 ```
 
-**Sample run** (one signed-in account):
+**Sample run** (consumer Copilot, before the M365 retool; re-measure for your tenant):
 
 | Concurrency | Result | Wall time | Latency (min / median / max) |
 | --- | --- | --- | --- |
@@ -260,16 +216,16 @@ one request runs immediately, the rest wait their turn. The failure at 8 is an
 upstream `502` (Copilot rejecting requests under load), not a server crash or
 timeout — so the exact break point is flaky and may vary between runs.
 
-> Takeaway: keep concurrent in-flight requests low (≈ 1–4). This is a personal
-> bridge, not a high-throughput gateway — and please don't hammer your account.
+> Takeaway: keep concurrent in-flight requests low (≈ 1–4). This is a proof of
+> concept, not a high-throughput gateway — and it runs as *your* account.
 
 ---
 
 ## Rate limiting
 
 Concurrency (above) is *how many at once*; the **rate limit** is *how many per
-minute, sustained*. Microsoft publishes none for consumer Copilot, so the bridge
-enforces a self-imposed one with a [token bucket](server/ratelimit.py): it caps
+minute, sustained*. M365 Copilot throttles each
+user (you'll see a `Throttled` error), so the bridge enforces a self-imposed one with a [token bucket](server/ratelimit.py): it caps
 accepted requests per minute and returns a standard `429` + `Retry-After` when
 you exceed it. Two env vars tune it:
 
@@ -282,8 +238,7 @@ you exceed it. Two env vars tune it:
 RATE_LIMIT_RPM=20 RATE_LIMIT_BURST=5 python app.py   # raise it; 0 to disable
 ```
 
-The default 12 rpm sits safely below the ~15 rpm where a single account starts
-seeing upstream `502`s. To find *your* ceiling, run the server with the limiter
+To find *your* ceiling, run the server with the limiter
 off (`RATE_LIMIT_RPM=0`) and push the probe until failures appear:
 
 ```bash
@@ -291,7 +246,7 @@ python tests/ratelimit.py --rpm 20 --minutes 3
 ```
 
 **On the client side, use exponential backoff.** Both `429` (bridge limit) and
-the occasional `502` (Copilot upstream hiccup) are transient — retry with
+the occasional `502` (upstream hiccup) are transient — retry with
 growing delays (e.g. 1s, 2s, 4s) and they almost always clear. The official
 `openai` SDK does this automatically and honours `Retry-After`; with plain HTTP,
 add a few retries yourself.
@@ -302,69 +257,48 @@ add a few retries yourself.
 
 | Path | What it does |
 | --- | --- |
-| [copilot/](copilot/) | The core library: `CopilotClient`, auth, browser sign-in, HTTP driver |
+| [copilot/client.py](copilot/client.py) | `CopilotClient`: the public API, picks a mode |
+| [copilot/browser.py](copilot/browser.py) | Playwright: sign-in, session capture, browser-mode chat (worker thread) |
+| [copilot/driver.py](copilot/driver.py) | Direct mode: replays the captured request over a WebSocket |
+| [copilot/protocol.py](copilot/protocol.py) | SignalR framing, reply parsing, request templating (pure, unit-tested) |
+| [copilot/auth.py](copilot/auth.py) | `session/token.json` load/save and token refresh |
+| [copilot/config.py](copilot/config.py) | URLs, selectors, timeouts (all overridable by env var) |
 | [server/](server/) | The FastAPI OpenAI-compatible server |
-| [examples/](examples/) | Runnable examples for every feature ([examples/README.md](examples/README.md)) |
-| [tests/](tests/) | Test scripts: the concurrency stress test ([tests/stress.py](tests/stress.py)) and the diagnostic & report tool ([tests/diagnostic.py](tests/diagnostic.py)) |
-| [app.py](app.py) | Starts the server |
+| [examples/](examples/) | Runnable examples |
+| [tests/](tests/) | Unit tests, the diagnostic capture tool, stress and rate-limit probes |
+
+Run the offline tests with `python -m unittest tests.test_protocol tests.test_server`.
 
 ---
 
 ## Notes & limitations
 
-- **Sign in once, then reuse.** The cached token refreshes automatically; you only re-sign-in if the session fully expires.
-- **No daily limit, but be reasonable.** Microsoft doesn't impose a daily chat cap, but please use it in moderation, and don't spam or hammer it with automated bulk requests.
-- **One model.** Copilot has no model picker, so the server advertises a single model named `copilot`.
-- **Roughly GPT-4 class.** On GPQA Diamond (198 graduate-level questions, closed-book) it scores **40.9%**, which puts it in the GPT-4 family rather than the reasoning tier (o1/o3). Measured with [tests/gpqa_bench.py](tests/gpqa_bench.py).
-- **Your session is private.** Everything in `session/` (cookies + token) stays on your machine and is git-ignored.
+- **Text only.** Replies are returned as text, citation markers (e.g. `[^1^]`) included. Cards, files and images the web app renders aren't surfaced.
+- **One prompt per turn.** The web app has no system/role channel, so the server flattens OpenAI `messages` into a single prompt ([server/prompt.py](server/prompt.py)).
+- **Tenant policy applies.** Conditional Access rules (compliant device, managed browser) can block the automated Chromium. If sign-in works in your normal browser but not here, that's the likely cause.
+- **Your session is a secret.** `session/` holds a signed-in browser profile and a bearer token. It's git-ignored; don't copy it around.
+- **Microsoft can change the web app at any time.** If something breaks, run the diagnostic below. Fixes usually mean adjusting a selector, the hub hint, or the reply parser.
 
 ---
 
 ## Troubleshooting
 
-Cloudflare clearance is handled automatically (see above), so most "verify you're
-human" issues clear themselves. If a request still fails, run the diagnostic — it
-refreshes the session and writes a shareable report.
-
 ```bash
-python tests/diagnostic.py                # browser capture + report
-python tests/diagnostic.py --report-only  # headless/VPS: report only, no browser
+python tests/diagnostic.py               # visible browser; send one message, then close it
+python tests/diagnostic.py --no-browser  # report only
 ```
 
-The default run opens your signed-in browser and asks you to send one short
-message. That single action:
+It writes `session/ws_capture.log` (every WebSocket the page opens and every chat
+frame sent and received, with tokens/JWTs/emails redacted) and
+`session/diagnostic_report.txt` (versions, config, session age, template shape).
 
-- **Refreshes clearance:** it drives a *real* browser on the same
-  `session/profile/` the bridge uses, so passing any "verify you're human" check
-  earns a fresh `cf_clearance` cookie, then snapshots the session (cookies +
-  token) into `session/token.json` for the pure-HTTP driver to adopt.
-- **Captures the protocol** to `session/ws_capture.log`. A clean turn goes
-  `setOptions` → `send` → `appendText…` → `done`; a `{"event":"challenge",
-  "method":"cloudflare",…}` frame means Cloudflare gated the turn.
-
-It also writes `session/diagnostic_report.txt` — environment, the *shape* of your
-session (cookie names + token length, never the values), a live chat probe, and
-redacted log tails. **Both files are safe to share:** access tokens, cookies,
-OAuth codes, and emails are redacted before anything is written. Attach
-`diagnostic_report.txt` to a GitHub issue (skim it first) and the cause is
-usually obvious.
-
-> On a headless **server/VPS** you can't open a browser, so clearance can't be
-> earned there — pass `--report-only`, and do the clearance step on a machine
-> with a display (or route traffic through a residential connection, e.g. a
-> home-PC exit node), since datacenter IPs are where Cloudflare is strictest.
-
----
-
-## Collaboration & support
-
-Need a hand getting this running? Open a [GitHub issue](../../issues) for bugs (for setup/auth problems, attach the redacted `diagnostic_report.txt` from `python tests/diagnostic.py`), start a [discussion](../../discussions) to share ideas, or send a pull request.
-
-And if you're working on something interesting, or looking for someone to build it, I'm always open to a chat. Feel free to reach out:
-
-- X: [@sums001](https://x.com/sums001)
-- Email: [devsum0101@gmail.com](mailto:devsum0101@gmail.com)
-- Discord: `sum_s_s`
+| Symptom | Likely fix |
+| --- | --- |
+| "chat box not found" | Find the composer in the capture/DevTools and set `M365_COMPOSER_SELECTORS`. |
+| "page never opened its chat socket" | Check the `OPEN` lines in the capture for the chat URL; set `M365_CHATHUB_HINT`. |
+| Replies empty or cut short | Compare `<<` frames with `ReplyParser` in [copilot/protocol.py](copilot/protocol.py). |
+| Direct mode `InvalidRequest` / closed socket | Re-run `python -m copilot login` to capture a fresh template, or use browser mode. |
+| `AuthRequired` / HTTP 503 | Run `python -m copilot login`. |
 
 ---
 

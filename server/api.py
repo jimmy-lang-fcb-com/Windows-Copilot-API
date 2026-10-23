@@ -1,4 +1,4 @@
-"""FastAPI app wiring Copilot onto the OpenAI Chat Completions API."""
+"""FastAPI app wiring M365 Copilot onto the OpenAI Chat Completions API."""
 
 import threading
 import time
@@ -6,8 +6,7 @@ import time
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from copilot import CopilotClient
-from copilot.driver import ClearanceRequired
+from copilot import AuthRequired, CopilotClient
 
 from .config import MODEL_NAME, RATE_LIMIT_BURST, RATE_LIMIT_RPM
 from .openai_format import (
@@ -20,18 +19,15 @@ from .prompt import messages_to_prompt
 from .ratelimit import TokenBucket
 from .schemas import ChatCompletionRequest
 
-app = FastAPI(title="Copilot OpenAI-compatible API", version="1.0.0")
-# Server runs headless and must never pop a visible browser mid-request. With
-# both recovery passes disabled, an expired clearance surfaces immediately as a
-# 503 (see ClearanceRequired handling below) so an operator can re-clear out of
-# band (`python -m copilot login`). Headless auto-solve is intentionally off:
-# it's unreliable on low-trust egress and a failed pass can wedge the session.
-client = CopilotClient(interactive_clear=False, headless_clear=False)
+app = FastAPI(title="M365 Copilot OpenAI-compatible API", version="2.0.0")
+# The server must never pop a sign-in window mid-request: when the session is
+# signed out it answers 503 and an operator re-runs `python -m copilot login`.
+# Mode (browser/direct) comes from $COPILOT_MODE.
+client = CopilotClient(interactive_login=False)
 
-_CLEARANCE_HELP = (
-    "Cloudflare clearance expired and could not be refreshed headlessly. "
-    "Re-clear in a browser: run `python -m copilot login` (or `python tests/diagnostic.py`) "
-    "and pass the 'verify you're human' check, then retry."
+_AUTH_HELP = (
+    "M365 Copilot session is signed out or expired. "
+    "Run `python -m copilot login` on this machine, then retry."
 )
 
 # Self-imposed rate limit on top of the concurrency lock below: this caps
@@ -58,11 +54,10 @@ def _rate_limited_response():
         }},
     )
 
-# Copilot's per-account chat socket doesn't tolerate concurrent conversations
-# from one process (parallel requests error out or hang). This server bridges a
-# single signed-in account, so we serialize upstream calls: concurrent HTTP
-# requests queue here and run one at a time. Predictable, at the cost of
-# parallelism — fine for a personal bridge.
+# This server bridges a single signed-in account (and, in browser mode, a single
+# browser), so upstream calls are serialized: concurrent HTTP requests queue here
+# and run one at a time. Predictable, at the cost of parallelism — fine for a
+# proof of concept.
 _upstream_lock = threading.Lock()
 
 
@@ -81,7 +76,7 @@ def _stream(prompt: str, model: str, conversation_id=None):
             for piece in stream:
                 if isinstance(piece, str) and piece:
                     yield sse_event(stream_chunk(cid, created, model, {"content": piece}))
-            # Copilot's conversation id is known once the stream has run; emit it
+            # The conversation id is known once the stream has run; emit it
             # on the final chunk so callers can track the upstream thread.
             yield sse_event(
                 stream_chunk(
@@ -89,9 +84,9 @@ def _stream(prompt: str, model: str, conversation_id=None):
                     conversation_id=stream.conversation_id,
                 )
             )
-    except ClearanceRequired:
+    except AuthRequired:
         yield sse_event(
-            stream_chunk(cid, created, model, {"content": f"\n[error: {_CLEARANCE_HELP}]"}, finish="error")
+            stream_chunk(cid, created, model, {"content": f"\n[error: {_AUTH_HELP}]"}, finish="error")
         )
     except Exception as exc:  # surface errors to the client instead of hanging
         yield sse_event(
@@ -134,10 +129,10 @@ def chat_completions(req: ChatCompletionRequest):
     try:
         with _upstream_lock:  # serialize: one upstream chat at a time
             reply = client.chat(prompt, conversation_id=req.conversation_id)
-    except ClearanceRequired:
+    except AuthRequired:
         return JSONResponse(
             status_code=503,
-            content={"error": {"message": _CLEARANCE_HELP, "type": "clearance_required"}},
+            content={"error": {"message": _AUTH_HELP, "type": "auth_required"}},
         )
     except Exception as exc:
         return JSONResponse(
@@ -149,4 +144,4 @@ def chat_completions(req: ChatCompletionRequest):
 
 @app.get("/")
 def root():
-    return {"service": "Copilot OpenAI-compatible API", "endpoints": ["/v1/models", "/v1/chat/completions"]}
+    return {"service": "M365 Copilot OpenAI-compatible API", "mode": client.mode, "endpoints": ["/v1/models", "/v1/chat/completions"]}

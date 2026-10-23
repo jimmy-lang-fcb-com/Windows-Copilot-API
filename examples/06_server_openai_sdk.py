@@ -22,7 +22,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
 
 completion = client.chat.completions.create(
-    model="copilot",
+    model="m365-copilot",
     messages=[{"role": "user", "content": "Say hello in one short sentence."}],
 )
 print(completion.choices[0].message.content)
@@ -35,7 +35,7 @@ print("conversation_id:", cid)
 # To continue that conversation, send the id back via extra_body:
 #
 #   client.chat.completions.create(
-#       model="copilot",
+#       model="m365-copilot",
 #       messages=[{"role": "user", "content": "..."}],
 #       extra_body={"conversation_id": cid},
 #   )

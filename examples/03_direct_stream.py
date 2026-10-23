@@ -15,7 +15,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from copilot import CopilotClient
 
-client = CopilotClient(anonymous=False)
+client = CopilotClient()
 
 # Omit the id to start a fresh conversation. Its id is filled in on
 # .conversation_id as the stream runs, so you can read it afterwards.

@@ -8,12 +8,15 @@ services:
       # Bind inside the container; the host port is set under `ports` above.
       HOST: "0.0.0.0"
       PORT: "8000"
+      # browser (default) or direct. See README "Two modes".
+      COPILOT_MODE: "browser"
       # Self-imposed rate limit (see server/config.py). Tune to your account.
       RATE_LIMIT_RPM: "12"
       RATE_LIMIT_BURST: "4"
     volumes:
       # Persist the signed-in browser profile + cached token across restarts.
       # Sign in once on the host (`python -m copilot login`) so this folder is
-      # populated; the container only does the headless token refresh.
+      # populated. Sign in on a Linux host: a profile created on macOS/Windows
+      # encrypts its cookies with an OS key the container can't read.
       - ./session:/app/session
     restart: unless-stopped

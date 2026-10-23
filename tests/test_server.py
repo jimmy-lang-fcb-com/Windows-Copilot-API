@@ -9,8 +9,8 @@ from server import app
 
 class ServerStartupTests(unittest.TestCase):
     @patch("uvicorn.run")
-    @patch("copilot.auth.load_auth")
-    def test_uses_default_address(self, _load_auth, run):
+    @patch("copilot.auth.signed_in_before", return_value=True)
+    def test_uses_default_address(self, _signed_in, run):
         with patch.dict(os.environ, {}, clear=True):
             app()
 
@@ -18,8 +18,8 @@ class ServerStartupTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["port"], 8000)
 
     @patch("uvicorn.run")
-    @patch("copilot.auth.load_auth")
-    def test_uses_address_from_environment(self, _load_auth, run):
+    @patch("copilot.auth.signed_in_before", return_value=True)
+    def test_uses_address_from_environment(self, _signed_in, run):
         with patch.dict(os.environ, {"HOST": "0.0.0.0", "PORT": "8080"}, clear=True):
             app()
 
@@ -27,8 +27,8 @@ class ServerStartupTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["port"], 8080)
 
     @patch("uvicorn.run")
-    @patch("copilot.auth.load_auth")
-    def test_explicit_address_takes_precedence(self, _load_auth, run):
+    @patch("copilot.auth.signed_in_before", return_value=True)
+    def test_explicit_address_takes_precedence(self, _signed_in, run):
         with patch.dict(os.environ, {"HOST": "0.0.0.0", "PORT": "8080"}, clear=True):
             app(host="localhost", port=0)
 

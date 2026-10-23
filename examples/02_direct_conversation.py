@@ -17,7 +17,7 @@ import time
 
 from copilot import CopilotClient
 
-client = CopilotClient(anonymous=False)
+client = CopilotClient()
 
 # Turn 1 — no id is given, so this starts a NEW conversation and returns its id.
 first = client.chat("My name is Ada. Remember it.")

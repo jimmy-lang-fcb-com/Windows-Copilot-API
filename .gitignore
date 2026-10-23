@@ -4,8 +4,8 @@ __pycache__/
 venv/
 .venv/
 
-# All session state: persistent browser profile (cookies, Cloudflare
-# clearance, sign-in) + cached auth token. Secret.
+# All session state: persistent browser profile (work-account sign-in)
+# + captured chat token. Secret.
 session/
 docs/
 

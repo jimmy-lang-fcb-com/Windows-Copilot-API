@@ -21,7 +21,7 @@ URL = "http://localhost:8000/v1/chat/completions"
 
 # Turn 1 — new conversation.
 first = requests.post(URL, json={
-    "model": "copilot",
+    "model": "m365-copilot",
     "messages": [{"role": "user", "content": "My name is Ada. Remember it."}],
 }).json()
 print("Copilot:", first["choices"][0]["message"]["content"])
@@ -31,7 +31,7 @@ print("conversation_id:", cid)
 
 # Turn 2 — continue by sending the conversation_id back in the body.
 second = requests.post(URL, json={
-    "model": "copilot",
+    "model": "m365-copilot",
     "conversation_id": cid,
     "messages": [{"role": "user", "content": "What's my name? Just the name."}],
 }).json()
