@@ -10,7 +10,7 @@ def new_id() -> str:
     return f"chatcmpl-{uuid.uuid4().hex}"
 
 
-def completion_response(text: str, model: str, conversation_id=None) -> dict:
+def completion_response(text: str, model: str, conversation_id=None, tool_calls=None) -> dict:
     """A non-streaming ``chat.completion`` object.
 
     ``conversation_id`` is Copilot's own conversation id, surfaced as an extra
@@ -26,12 +26,23 @@ def completion_response(text: str, model: str, conversation_id=None) -> dict:
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": text},
-                "finish_reason": "stop",
+                "message": (
+                    {"role": "assistant", "content": text or None, "tool_calls": tool_calls}
+                    if tool_calls else {"role": "assistant", "content": text}
+                ),
+                "finish_reason": "tool_calls" if tool_calls else "stop",
             }
         ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
+
+
+def tool_call_deltas(tool_calls) -> list:
+    """Streaming form of ``tool_calls``: each call whole, with its index."""
+    return [
+        {"index": i, "id": c["id"], "type": "function", "function": c["function"]}
+        for i, c in enumerate(tool_calls)
+    ]
 
 
 def sse_event(payload: dict) -> str:

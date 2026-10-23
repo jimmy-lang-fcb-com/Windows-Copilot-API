@@ -11,3 +11,7 @@ MODEL_NAME = "m365-copilot"
 #   RATE_LIMIT_BURST max requests allowed back-to-back before pacing kicks in.
 RATE_LIMIT_RPM = float(os.environ.get("RATE_LIMIT_RPM", "12"))  # 12 rpm ≈ 5s per call
 RATE_LIMIT_BURST = int(os.environ.get("RATE_LIMIT_BURST", "4"))
+
+# Emulated tool calling: how many times to ask M365 Copilot to fix a malformed
+# tool call before giving up and returning its reply as plain text.
+TOOL_CALL_RETRIES = int(os.environ.get("TOOL_CALL_RETRIES", "1"))

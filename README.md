@@ -140,6 +140,67 @@ curl http://localhost:8000/v1/chat/completions \
 
 ---
 
+## Tool calling (emulated)
+
+M365 Copilot has no tool-calling API, so the server emulates it. Agents like
+opencode can then use their tools (read files, run commands, edit code)
+with M365 Copilot as the model. The tools run in the client, on your machine;
+M365 Copilot only decides which tool to call and with what arguments.
+
+How it works ([server/tools.py](server/tools.py)):
+
+1. When a request includes `tools`, the server writes them into the prompt
+   (descriptions trimmed) with an instruction to answer with
+   `<tool_call>{"name": ..., "arguments": {...}}</tool_call>` blocks.
+2. Those blocks are parsed out of the reply and returned as standard OpenAI
+   `tool_calls` (`finish_reason: "tool_calls"`), streaming or not.
+3. The client runs the tools and sends `role: "tool"` results back; they go
+   into the next prompt as `<tool_result>` blocks.
+4. If a call is malformed (unknown tool, bad JSON, missing argument), the server
+   asks M365 Copilot once, in the same conversation, to correct it.
+
+While streaming, text is sent as it arrives until something that might begin a
+tool call (`<tool_call`, or a code fence) shows up. From there the rest is
+buffered and parsed at the end.
+
+**Expect it to be less reliable than a model with native tool calling.** M365
+Copilot sometimes answers in prose, or uses its own search instead. Every
+request also resends the whole conversation, so long agent sessions will hit
+M365's per-message length limit sooner. The knobs:
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `TOOL_DESC_MAX` | `400` | Max characters kept from each tool description |
+| `TOOL_PARAM_DESC_MAX` | `150` | Max characters kept from each parameter description |
+| `TOOL_RESULT_MAX_CHARS` | `8000` | Max characters kept from each tool result |
+| `PROMPT_MAX_CHARS` | `0` (off) | Cap on the whole prompt; oldest turns are dropped to fit |
+| `TOOL_CALL_RETRIES` | `1` | Correction attempts for a malformed tool call |
+
+Each request starts a new M365 Copilot conversation, so agent sessions add many
+chats to your Copilot history. Direct mode (`COPILOT_MODE=direct`) suits agents
+best, since browser mode opens a tab per request.
+
+### Using it from opencode
+
+Start the server, then add an `opencode.json` (project folder or
+`~/.config/opencode/`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "m365": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "M365 Copilot (local)",
+      "options": { "baseURL": "http://localhost:8080/v1", "apiKey": "unused" },
+      "models": { "m365-copilot": { "name": "M365 Copilot" } }
+    }
+  }
+}
+```
+
+---
+
 ## Command line
 
 ```bash
@@ -270,14 +331,15 @@ add a few retries yourself.
 | [examples/](examples/) | Runnable examples |
 | [tests/](tests/) | Unit tests, the diagnostic capture tool, stress and rate-limit probes |
 
-Run the offline tests with `python -m unittest tests.test_protocol tests.test_server`.
+Run the offline tests with `python -m unittest tests.test_protocol tests.test_server tests.test_tools` (needs `pip install httpx` for the server tests).
 
 ---
 
 ## Notes & limitations
 
 - **Text only.** Replies are returned as text, citation markers (e.g. `[^1^]`) included. Cards, files and images the web app renders aren't surfaced.
-- **One prompt per turn.** The web app has no system/role channel, so the server flattens OpenAI `messages` into a single prompt ([server/prompt.py](server/prompt.py)).
+- **One prompt per turn.** The web app has no system/role channel, so the server flattens OpenAI `messages` (and any tool definitions and results) into a single prompt ([server/prompt.py](server/prompt.py), [server/tools.py](server/tools.py)).
+- **Tool calling is emulated** by prompting; see [Tool calling](#tool-calling-emulated).
 - **Tenant policy applies.** Conditional Access rules (compliant device, managed browser) can block the automated Chromium. If sign-in works in your normal browser but not here, that's the likely cause.
 - **Your session is a secret.** `session/` holds a signed-in browser profile and a bearer token. It's git-ignored; don't copy it around.
 - **Microsoft can change the web app at any time.** If something breaks, run the diagnostic below. Fixes usually mean adjusting a selector, the hub hint, or the reply parser.

@@ -8,16 +8,18 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from copilot import AuthRequired, CopilotClient
 
-from .config import MODEL_NAME, RATE_LIMIT_BURST, RATE_LIMIT_RPM
+from .config import MODEL_NAME, RATE_LIMIT_BURST, RATE_LIMIT_RPM, TOOL_CALL_RETRIES
 from .openai_format import (
     completion_response,
     new_id,
     sse_event,
     stream_chunk,
+    tool_call_deltas,
 )
 from .prompt import messages_to_prompt
 from .ratelimit import TokenBucket
 from .schemas import ChatCompletionRequest
+from .tools import ParsedReply, build_prompt, correction_prompt, holdback, parse_reply
 
 app = FastAPI(title="M365 Copilot OpenAI-compatible API", version="2.0.0")
 # The server must never pop a sign-in window mid-request: when the session is
@@ -95,6 +97,69 @@ def _stream(prompt: str, model: str, conversation_id=None):
     yield "data: [DONE]\n\n"
 
 
+def _resolve_tool_calls(text: str, conversation_id, tools) -> ParsedReply:
+    """Parse tool calls from a reply; ask M365 to fix a malformed one.
+
+    Runs under the upstream lock. The correction is sent as a follow-up in the
+    same M365 conversation, so the model sees its own broken reply.
+    """
+    parsed = parse_reply(text, tools)
+    for _ in range(TOOL_CALL_RETRIES):
+        if not parsed.error or not conversation_id:
+            break
+        retry = client.chat(correction_prompt(parsed.error), conversation_id=conversation_id)
+        fixed = parse_reply(retry.text, tools)
+        if fixed.tool_calls or not fixed.error:
+            if not fixed.content:
+                fixed.content = parsed.content
+            parsed = fixed
+    return parsed
+
+
+def _stream_with_tools(prompt: str, model: str, tools, conversation_id=None):
+    """Like :func:`_stream`, but recognizes emulated tool calls.
+
+    Text is streamed until something that could start a tool call appears; from
+    there the reply is buffered, parsed at the end, and sent either as
+    ``tool_calls`` or as the remaining text.
+    """
+    cid = new_id()
+    created = int(time.time())
+    try:
+        with _upstream_lock:
+            yield sse_event(stream_chunk(cid, created, model, {"role": "assistant"}))
+            stream = client.stream(prompt, conversation_id=conversation_id)
+            buffer, sent = "", 0
+            for piece in stream:
+                if not isinstance(piece, str) or not piece:
+                    continue
+                buffer += piece
+                safe = holdback(buffer)
+                if safe > sent:
+                    yield sse_event(stream_chunk(cid, created, model, {"content": buffer[sent:safe]}))
+                    sent = safe
+            parsed = _resolve_tool_calls(buffer, stream.conversation_id, tools)
+            if parsed.tool_calls:
+                yield sse_event(stream_chunk(
+                    cid, created, model, {"tool_calls": tool_call_deltas(parsed.tool_calls)}))
+                finish = "tool_calls"
+            else:
+                if len(buffer) > sent:
+                    yield sse_event(stream_chunk(cid, created, model, {"content": buffer[sent:]}))
+                finish = "stop"
+            yield sse_event(stream_chunk(
+                cid, created, model, {}, finish=finish, conversation_id=stream.conversation_id))
+    except AuthRequired:
+        yield sse_event(
+            stream_chunk(cid, created, model, {"content": f"\n[error: {_AUTH_HELP}]"}, finish="error")
+        )
+    except Exception as exc:
+        yield sse_event(
+            stream_chunk(cid, created, model, {"content": f"\n[error: {exc}]"}, finish="error")
+        )
+    yield "data: [DONE]\n\n"
+
+
 @app.get("/v1/models")
 def list_models():
     return {
@@ -107,7 +172,11 @@ def list_models():
 
 @app.post("/v1/chat/completions")
 def chat_completions(req: ChatCompletionRequest):
-    prompt = messages_to_prompt(req.messages)
+    tools = req.tools if req.tools and req.tool_choice != "none" else None
+    if tools:
+        prompt = build_prompt(req.messages, tools, req.tool_choice)
+    else:
+        prompt = messages_to_prompt(req.messages)
     if not prompt.strip():
         return JSONResponse(
             status_code=400,
@@ -122,13 +191,17 @@ def chat_completions(req: ChatCompletionRequest):
         return limited
 
     if req.stream:
-        return StreamingResponse(
-            _stream(prompt, model, req.conversation_id), media_type="text/event-stream"
-        )
+        events = (_stream_with_tools(prompt, model, tools, req.conversation_id) if tools
+                  else _stream(prompt, model, req.conversation_id))
+        return StreamingResponse(events, media_type="text/event-stream")
 
     try:
         with _upstream_lock:  # serialize: one upstream chat at a time
             reply = client.chat(prompt, conversation_id=req.conversation_id)
+            if tools:
+                parsed = _resolve_tool_calls(reply.text, reply.conversation_id, tools)
+                return completion_response(
+                    parsed.content, model, reply.conversation_id, parsed.tool_calls or None)
     except AuthRequired:
         return JSONResponse(
             status_code=503,
