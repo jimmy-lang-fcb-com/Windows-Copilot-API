@@ -18,20 +18,20 @@ message so far), so :class:`ReplyParser` turns it into deltas.
 We deliberately don't hard-code the request body. It carries dozens of
 tenant- and build-specific option flags, so instead we record the one the page
 sends during login (the "template") and swap in the prompt and ids
-(:func:`build_invocation`). If Microsoft changes the shape, re-run
+(:func:`build_turn`). If Microsoft changes the shape, re-run
 ``python -m copilot login`` and the new template is picked up automatically.
 
 Pure functions only — no I/O — so this is unit-tested offline.
 """
 
 import base64
-import copy
 import json
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 RS = "\x1e"
 HANDSHAKE = json.dumps({"protocol": "json", "version": 1}) + RS
@@ -51,7 +51,9 @@ Event = Tuple[str, Optional[str]]
 # (The answer itself carries no messageType, or "Chat".)
 _ANSWER_TYPES = (None, "", "Chat")
 
-# Request fields that must be unique per turn. Regenerated in the template.
+# Request fields that must be unique per turn. Regenerated in the template
+# (consistently: an id reused elsewhere, e.g. in the socket URL, gets the same
+# new value there too).
 _PER_TURN_ID_KEYS = {"requestId", "traceId", "clientCorrelationId", "messageId"}
 
 
@@ -180,38 +182,96 @@ def invocation_from_frame(data: Any) -> Optional[dict]:
     return None
 
 
-def build_invocation(
+def build_turn(
     template: dict,
+    captured_url: str,
+    access_token: str,
     prompt: str,
     conversation_id: str,
     start_of_session: bool,
     invocation_id: str = "0",
-) -> str:
-    """Fill a captured ``chat`` invocation with a new prompt; return the wire text."""
-    rec = copy.deepcopy(template)
+) -> Tuple[str, str]:
+    """Build the socket URL and ``chat`` request for one turn from the capture.
+
+    Returns ``(url, wire_text)``. Ids are swapped *consistently*: each old id
+    (the conversation id, every per-turn id in the body, and the URL's
+    ClientRequestId) maps to one new value, replaced everywhere it appears. The
+    page often reuses one id in several places (body and URL), and the service
+    may check that they agree.
+    """
+    args = template["arguments"][0]
+    mapping: Dict[str, str] = {}
+    old_conversation = args.get("conversationId")
+    if isinstance(old_conversation, str) and old_conversation:
+        mapping[old_conversation] = conversation_id
+    for old in _per_turn_ids(template):
+        mapping.setdefault(old, str(uuid.uuid4()))
+
+    # URL: fresh token; ClientRequestId follows the mapping when the body uses it.
+    parts = urlparse(captured_url)
+    query = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        low = key.lower()
+        if low in ("access_token", "accesstoken"):
+            value = access_token
+        elif low == "clientrequestid":
+            value = _lookup(mapping, value) or mapping.setdefault(value, str(uuid.uuid4()))
+        else:
+            value = _remap(value, mapping)
+        query.append((key, value))
+    url = urlunparse(parts._replace(query=urlencode(query, quote_via=quote)))
+
+    rec = json.loads(_remap(json.dumps(template), mapping))
     rec["invocationId"] = invocation_id
     args = rec["arguments"][0]
     args["conversationId"] = conversation_id
     if "isStartOfSession" in args:
         args["isStartOfSession"] = start_of_session
     args["message"]["text"] = prompt
-    _refresh_ids(args)
-    return json.dumps(rec) + RS
+    _refresh_timestamps(rec)
+    return url, json.dumps(rec) + RS
 
 
-def _refresh_ids(node: Any) -> None:
-    """Regenerate per-turn ids and timestamps in place."""
+def _per_turn_ids(node: Any) -> List[str]:
+    """Values of the per-turn id fields anywhere in ``node``."""
+    found: List[str] = []
     if isinstance(node, dict):
         for key, value in node.items():
-            if key in _PER_TURN_ID_KEYS and isinstance(value, str):
-                node[key] = str(uuid.uuid4())
-            elif key == "timestamp" and isinstance(value, str):
-                node[key] = datetime.now(timezone.utc).astimezone().isoformat()
+            if key in _PER_TURN_ID_KEYS and isinstance(value, str) and len(value) >= 8:
+                found.append(value)
             else:
-                _refresh_ids(value)
+                found.extend(_per_turn_ids(value))
     elif isinstance(node, list):
         for item in node:
-            _refresh_ids(item)
+            found.extend(_per_turn_ids(item))
+    return found
+
+
+def _lookup(mapping: Dict[str, str], value: str) -> Optional[str]:
+    for old, new in mapping.items():
+        if old.lower() == value.lower():
+            return new
+    return None
+
+
+def _remap(text: str, mapping: Dict[str, str]) -> str:
+    """Replace every old id in ``text`` (case-insensitively) with its new value."""
+    for old, new in mapping.items():
+        if len(old) >= 8:
+            text = re.sub(re.escape(old), new, text, flags=re.IGNORECASE)
+    return text
+
+
+def _refresh_timestamps(node: Any) -> None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "timestamp" and isinstance(value, str):
+                node[key] = datetime.now(timezone.utc).astimezone().isoformat()
+            else:
+                _refresh_timestamps(value)
+    elif isinstance(node, list):
+        for item in node:
+            _refresh_timestamps(item)
 
 
 def token_from_url(url: str) -> Optional[str]:
@@ -220,20 +280,6 @@ def token_from_url(url: str) -> Optional[str]:
         if key.lower() in ("access_token", "accesstoken"):
             return value
     return None
-
-
-def socket_url(captured_url: str, access_token: str) -> str:
-    """Rebuild a captured chat-socket URL with a fresh token and request id."""
-    parts = urlparse(captured_url)
-    query = []
-    for key, value in parse_qsl(parts.query, keep_blank_values=True):
-        low = key.lower()
-        if low in ("access_token", "accesstoken"):
-            value = access_token
-        elif low == "clientrequestid":
-            value = str(uuid.uuid4())
-        query.append((key, value))
-    return urlunparse(parts._replace(query=urlencode(query)))
 
 
 def jwt_expiry(token: Optional[str]) -> Optional[float]:
@@ -249,3 +295,20 @@ def jwt_expiry(token: Optional[str]) -> Optional[float]:
 def token_is_fresh(token: Optional[str], margin: float) -> bool:
     exp = jwt_expiry(token)
     return bool(token) and exp is not None and exp - margin > time.time()
+
+
+# -- debugging ------------------------------------------------------------------
+
+_REDACTORS = [
+    (re.compile(r"(access_?token)=[^&\s\"]+", re.I), r"\1=<REDACTED>"),
+    (re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)?"), "<JWT>"),
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "<EMAIL>"),
+    (re.compile(r"[A-Za-z0-9_\-]{60,}"), "<REDACTED>"),
+]
+
+
+def redact(text: str) -> str:
+    """Strip tokens, JWTs, emails and long opaque strings from log text."""
+    for pattern, repl in _REDACTORS:
+        text = pattern.sub(repl, text)
+    return text

@@ -159,6 +159,9 @@ python -m copilot ask --show "Hello!"    # browser mode with a visible window
 | `M365_COPILOT_URL` | `https://m365.cloud.microsoft/chat` | Chat page to open |
 | `M365_CHATHUB_HINT` | `chathub` | Substring that identifies the chat WebSocket URL |
 | `M365_COMPOSER_SELECTORS` | (see [copilot/config.py](copilot/config.py)) | Comma-separated CSS selectors for the chat box |
+| `M365_SEND_SELECTORS` | (see [copilot/config.py](copilot/config.py)) | Send button, clicked if Enter doesn't send |
+| `M365_BROWSER_CHANNEL` | `chromium` | `chromium` (new headless mode), `msedge` (installed Edge), or empty for Playwright's headless shell |
+| `COPILOT_DEBUG` | unset | `1` logs direct-mode frames (redacted) to `session/direct_debug.log` |
 | `M365_WARMUP_PROMPT` | `Reply with the single word: ready` | Message used to capture the session |
 | `M365_SESSION_DIR` | `session` | Where the profile and token live |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | Server address |
@@ -297,8 +300,10 @@ frame sent and received, with tokens/JWTs/emails redacted) and
 | "chat box not found" | Find the composer in the capture/DevTools and set `M365_COMPOSER_SELECTORS`. |
 | "page never opened its chat socket" | Check the `OPEN` lines in the capture for the chat URL; set `M365_CHATHUB_HINT`. |
 | Replies empty or cut short | Compare `<<` frames with `ReplyParser` in [copilot/protocol.py](copilot/protocol.py). |
-| Direct mode `InvalidRequest` / closed socket | Re-run `python -m copilot login` to capture a fresh template, or use browser mode. |
+| Direct mode `InvalidRequest` / closed socket | Run it with `COPILOT_DEBUG=1` and compare `session/direct_debug.log` (`>>` lines) with the browser's request in `session/ws_capture.log` from the diagnostic. Browser mode is unaffected. |
 | `AuthRequired` / HTTP 503 | Run `python -m copilot login`. |
+| "The prompt was never sent" | Open `session/last_error.png`; try `ask --show`, or `M365_BROWSER_CHANNEL=msedge`. |
+| Windows `WinError 10013` starting the server | Port is taken or reserved (Hyper-V/WSL/Docker). Use another: `PORT=8080 python app.py`. |
 
 ---
 

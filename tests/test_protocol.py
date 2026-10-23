@@ -12,10 +12,9 @@ from copilot.protocol import (
     RS,
     TEXT,
     ReplyParser,
-    build_invocation,
+    build_turn,
     invocation_from_frame,
     jwt_expiry,
-    socket_url,
     token_from_url,
     token_is_fresh,
 )
@@ -38,13 +37,17 @@ TEMPLATE = {
     "invocationId": "0",
     "arguments": [{
         "source": "officeweb",
-        "conversationId": "old-conv",
+        "conversationId": "old-conv-0001",
         "isStartOfSession": True,
-        "traceId": "old-trace",
-        "message": {"author": "user", "text": "warm-up", "requestId": "old-req",
+        "traceId": "old-trace-0001",
+        "message": {"author": "user", "text": "warm-up", "requestId": "old-req-0001",
                     "timestamp": "2026-01-01T00:00:00+00:00"},
     }],
 }
+
+
+URL = ("wss://substrate.office.com/m365Copilot/Chathub/a@b?ClientRequestId=r1"
+       "&access_token=OLD&source=%22officeweb%22")
 
 
 def fake_jwt(exp: float) -> str:
@@ -92,8 +95,9 @@ class ReplyParserTests(unittest.TestCase):
 
 
 class RequestTests(unittest.TestCase):
-    def test_build_invocation_fills_prompt_and_refreshes_ids(self):
-        out = build_invocation(TEMPLATE, "new prompt", "conv-9", start_of_session=False, invocation_id="3")
+    def test_build_turn_fills_prompt_and_refreshes_ids(self):
+        url, out = build_turn(TEMPLATE, URL, "NEW", "new prompt", "conv-9",
+                              start_of_session=False, invocation_id="3")
         self.assertTrue(out.endswith(RS))
         sent = json.loads(out[:-1])
         args = sent["arguments"][0]
@@ -101,22 +105,35 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(args["conversationId"], "conv-9")
         self.assertFalse(args["isStartOfSession"])
         self.assertEqual(args["message"]["text"], "new prompt")
-        self.assertNotEqual(args["traceId"], "old-trace")
-        self.assertNotEqual(args["message"]["requestId"], "old-req")
+        self.assertNotEqual(args["traceId"], "old-trace-0001")
+        self.assertNotEqual(args["message"]["requestId"], "old-req-0001")
         self.assertEqual(TEMPLATE["arguments"][0]["message"]["text"], "warm-up")  # template untouched
+
+    def test_build_turn_keeps_shared_ids_consistent(self):
+        # The page reuses one id in the URL and body, and the conversation id
+        # in a second field; the replay must keep each pair in agreement.
+        template = json.loads(json.dumps(TEMPLATE))
+        template["arguments"][0]["clientCorrelationId"] = "SHARED-ID-1234"
+        template["arguments"][0]["threadId"] = "old-conv-0001"
+        url = URL.replace("ClientRequestId=r1", "ClientRequestId=shared-id-1234")
+        new_url, out = build_turn(template, url, "NEW", "p", "conv-9", start_of_session=True)
+        args = json.loads(out[:-1])["arguments"][0]
+        new_id = args["clientCorrelationId"]
+        self.assertNotEqual(new_id.lower(), "shared-id-1234")
+        self.assertIn(f"ClientRequestId={new_id}", new_url)
+        self.assertEqual(args["threadId"], "conv-9")
+
+    def test_build_turn_url_swaps_token_and_request_id(self):
+        self.assertEqual(token_from_url(URL), "OLD")
+        new, _ = build_turn(TEMPLATE, URL, "NEW", "p", "c", start_of_session=True)
+        self.assertEqual(token_from_url(new), "NEW")
+        self.assertNotIn("ClientRequestId=r1", new)
+        self.assertIn("source=%22officeweb%22", new)
 
     def test_invocation_from_sent_frame(self):
         self.assertEqual(invocation_from_frame(rec(TEMPLATE))["target"], "chat")
         self.assertIsNone(invocation_from_frame(rec({"type": 6})))
         self.assertIsNone(invocation_from_frame('{"protocol":"json","version":1}' + RS))
-
-    def test_socket_url_swaps_token_and_request_id(self):
-        url = "wss://substrate.office.com/m365Copilot/Chathub/a@b?ClientRequestId=r1&access_token=OLD&x=1"
-        self.assertEqual(token_from_url(url), "OLD")
-        new = socket_url(url, "NEW")
-        self.assertEqual(token_from_url(new), "NEW")
-        self.assertNotIn("r1", new)
-        self.assertIn("x=1", new)
 
     def test_jwt_expiry_and_freshness(self):
         soon, later = time.time() + 60, time.time() + 3600

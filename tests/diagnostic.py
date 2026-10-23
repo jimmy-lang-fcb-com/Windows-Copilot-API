@@ -25,7 +25,6 @@ written, but skim both files before sharing them outside IT.
 import argparse
 import json
 import platform
-import re
 import sys
 import time
 from pathlib import Path
@@ -34,26 +33,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from copilot import config  # noqa: E402
 from copilot.auth import load_session  # noqa: E402
-from copilot.protocol import jwt_expiry  # noqa: E402
+from copilot.protocol import jwt_expiry, redact  # noqa: E402
 
 SESSION_DIR = Path(config.SESSION_DIR)
 WS_LOG = SESSION_DIR / "ws_capture.log"
 REPORT = SESSION_DIR / "diagnostic_report.txt"
 CAPTURE_SECONDS = 300
-
-_REDACTORS = [
-    (re.compile(r"(access_?token)=[^&\s\"]+", re.I), r"\1=<REDACTED>"),
-    (re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)?"), "<JWT>"),
-    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "<EMAIL>"),
-    (re.compile(r"[A-Za-z0-9_\-]{60,}"), "<REDACTED>"),
-]
-
-
-def redact(text: str) -> str:
-    for pattern, repl in _REDACTORS:
-        text = pattern.sub(repl, text)
-    return text
-
 
 def _text(payload) -> str:
     if isinstance(payload, (bytes, bytearray)):

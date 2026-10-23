@@ -49,15 +49,22 @@ class ChatStream:
         self.conversation_id = conversation_id
 
     def __iter__(self) -> Iterator[str]:
-        for kind, payload in self._events:
-            if kind == CONVERSATION:
-                self.conversation_id = payload
-            elif kind == TEXT:
-                yield payload
-            elif kind == ERROR:
-                raise CopilotError(payload)
-            elif kind == DONE:
-                return
+        try:
+            for kind, payload in self._events:
+                if kind == CONVERSATION:
+                    self.conversation_id = payload
+                elif kind == TEXT:
+                    yield payload
+                elif kind == ERROR:
+                    raise CopilotError(payload)
+                elif kind == DONE:
+                    return
+        finally:
+            # Close the backend now (e.g. the direct socket), not at interpreter
+            # shutdown, where closing it can fail.
+            close = getattr(self._events, "close", None)
+            if close is not None:
+                close()
 
 
 class CopilotClient:
