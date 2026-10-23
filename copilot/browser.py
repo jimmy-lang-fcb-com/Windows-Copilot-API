@@ -56,6 +56,7 @@ class ChatPage:
         self.socket_url: Optional[str] = None
         self.template: Optional[dict] = None
         self.conversation_id: Optional[str] = None
+        self._sent = False  # the page sent a `chat` request this turn
         self._parser: Optional[ReplyParser] = None
         self._pending: List[Event] = []
         self._last_frame = 0.0
@@ -76,6 +77,7 @@ class ChatPage:
         if invocation is None:
             return
         self.template = invocation
+        self._sent = True
         cid = (invocation.get("arguments") or [{}])[0].get("conversationId")
         if cid:
             self.conversation_id = cid
@@ -111,15 +113,40 @@ class ChatPage:
         """Signed in and the chat composer is on screen."""
         return self.on_chat_host() and self.composer() is not None
 
-    def wait_ready(self, timeout: float) -> bool:
+    def wait_ready(self, timeout: float, settle_ms: int = 0) -> bool:
+        """Wait for the chat box. ``settle_ms`` then gives the app time to finish
+        wiring up its handlers: the box can render before Enter actually sends."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self.closed():
                 return False
             if self.ready():
+                if settle_ms:
+                    self.page.wait_for_timeout(settle_ms)
                 return True
             self.page.wait_for_timeout(500)
         return False
+
+    def click_send(self) -> bool:
+        """Click the Send button, if one is visible."""
+        for selector in config.SEND_BUTTON_SELECTORS:
+            try:
+                button = self.page.locator(selector).first
+                if button.is_visible() and button.is_enabled():
+                    button.click()
+                    return True
+            except PlaywrightError:
+                continue
+        return False
+
+    def screenshot(self) -> Optional[str]:
+        """Save a screenshot for debugging; returns its path."""
+        path = f"{config.SESSION_DIR}/last_error.png"
+        try:
+            self.page.screenshot(path=path, full_page=True)
+            return path
+        except Exception:
+            return None
 
     def closed(self) -> bool:
         try:
@@ -141,15 +168,29 @@ class ChatPage:
             return
         self._parser = ReplyParser()
         self._pending = []
+        self._sent = False
         announced = self.conversation_id
         box.click()
         self.page.keyboard.insert_text(prompt)  # insert, not type: newlines would send early
         self.page.keyboard.press("Enter")
 
         started = self._last_frame = time.time()
+        clicked_send = False
         try:
             while True:
                 self.page.wait_for_timeout(100)  # lets Playwright deliver socket events
+                waited = time.time() - started
+                if not self._sent and not clicked_send and waited > config.SEND_RETRY_AFTER:
+                    clicked_send = True  # Enter didn't send; try the button once
+                    if self.click_send():
+                        _status("Enter didn't send the prompt; clicked Send instead.")
+                if not self._sent and waited > config.SEND_TIMEOUT:
+                    shot = self.screenshot()
+                    yield (ERROR, f"The prompt was never sent (no chat request after {config.SEND_TIMEOUT:.0f}s). "
+                                  f"Page: {self.page.url}. "
+                                  + (f"Screenshot: {shot}. " if shot else "")
+                                  + "Try `python -m copilot ask --show ...` to watch it.")
+                    return
                 if self.conversation_id and self.conversation_id != announced:
                     announced = self.conversation_id
                     yield (CONVERSATION, announced)
@@ -186,11 +227,14 @@ class BrowserSession:
             return self
         try:
             self._pw = sync_playwright().start()
-            self._context = self._pw.chromium.launch_persistent_context(
-                self.profile_dir,
-                headless=self.headless,
-                viewport={"width": 1280, "height": 900},
-            )
+            kwargs = dict(headless=self.headless, viewport={"width": 1280, "height": 900})
+            if config.BROWSER_CHANNEL:
+                # "chromium" = the full browser's new headless mode, which presents
+                # as ordinary Chrome; the default headless shell says
+                # "HeadlessChrome", which web apps can treat differently.
+                # "msedge" uses the installed Edge.
+                kwargs["channel"] = config.BROWSER_CHANNEL
+            self._context = self._pw.chromium.launch_persistent_context(self.profile_dir, **kwargs)
         except PlaywrightError as exc:
             self.close()
             raise ConnectionError(f"Failed to start browser: {exc}") from exc
@@ -369,7 +413,7 @@ class BrowserChat:
             pages.move_to_end(conversation_id)
         else:
             chat = browser.new_page()
-            if not chat.wait_ready(45):
+            if not chat.wait_ready(45, settle_ms=3000):
                 raise AuthRequired("M365 Copilot is not signed in. Run `python -m copilot login`.")
 
         announced = conversation_id

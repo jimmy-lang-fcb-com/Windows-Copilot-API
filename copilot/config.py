@@ -28,6 +28,24 @@ COMPOSER_SELECTORS = [
     if s.strip()
 ]
 
+# Send button, clicked if pressing Enter didn't send the prompt.
+SEND_BUTTON_SELECTORS = [
+    s.strip()
+    for s in os.environ.get(
+        "M365_SEND_SELECTORS",
+        "button[aria-label='Send'],"
+        "button[aria-label*='Send' i],"
+        "button[title*='Send' i],"
+        "button[type='submit']",
+    ).split(",")
+    if s.strip()
+]
+
+# Playwright browser channel: "chromium" (default; new headless mode that looks
+# like normal Chrome), "msedge" (installed Edge), or "" for Playwright's default
+# headless shell.
+BROWSER_CHANNEL = os.environ.get("M365_BROWSER_CHANNEL", "chromium")
+
 # Session state: persistent browser profile + captured chat session. Secret.
 SESSION_DIR = os.environ.get("M365_SESSION_DIR", "session")
 PROFILE_DIR = f"{SESSION_DIR}/profile"
@@ -55,3 +73,5 @@ USER_AGENT = (
 # Timeouts (seconds).
 TURN_TIMEOUT = 600   # whole reply
 IDLE_TIMEOUT = 90    # silence between frames before giving up
+SEND_RETRY_AFTER = 8 # no chat request yet -> click the Send button
+SEND_TIMEOUT = 25    # no chat request yet -> give up, save a screenshot
