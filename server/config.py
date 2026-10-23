@@ -15,3 +15,7 @@ RATE_LIMIT_BURST = int(os.environ.get("RATE_LIMIT_BURST", "4"))
 # Emulated tool calling: how many times to ask M365 Copilot to fix a malformed
 # tool call before giving up and returning its reply as plain text.
 TOOL_CALL_RETRIES = int(os.environ.get("TOOL_CALL_RETRIES", "1"))
+
+# Continue one M365 conversation across a chat session instead of resending the
+# whole history (see server/conversations.py). Set 0 to always start fresh.
+CONVERSATION_REUSE = os.environ.get("CONVERSATION_REUSE", "1") not in ("0", "false", "no")

@@ -164,9 +164,7 @@ tool call (`<tool_call`, or a code fence) shows up. From there the rest is
 buffered and parsed at the end.
 
 **Expect it to be less reliable than a model with native tool calling.** M365
-Copilot sometimes answers in prose, or uses its own search instead. Every
-request also resends the whole conversation, so long agent sessions will hit
-M365's per-message length limit sooner. The knobs:
+Copilot sometimes answers in prose, or uses its own search instead. The knobs:
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
@@ -176,9 +174,33 @@ M365's per-message length limit sooner. The knobs:
 | `PROMPT_MAX_CHARS` | `0` (off) | Cap on the whole prompt; oldest turns are dropped to fit |
 | `TOOL_CALL_RETRIES` | `1` | Correction attempts for a malformed tool call |
 
-Each request starts a new M365 Copilot conversation, so agent sessions add many
-chats to your Copilot history. Direct mode (`COPILOT_MODE=direct`) suits agents
-best, since browser mode opens a tab per request.
+Direct mode (`COPILOT_MODE=direct`) suits agents best: its conversations
+persist, while browser mode keeps only the six most recent conversations' tabs
+open.
+
+### One M365 conversation per session
+
+OpenAI clients resend the whole history with every request. Instead of
+forwarding all of it, the server remembers which M365 conversation produced
+each reply ([server/conversations.py](server/conversations.py)). When the next
+request is that same history plus new messages, only the new part (tool
+results, the next question) goes to the existing conversation. That keeps
+prompts small, avoids M365's length limit, and gives one chat in your Copilot
+history per session instead of one per step.
+
+- System messages are ignored when matching, since agents often regenerate them.
+- Edited or compacted history doesn't match, so it starts a fresh conversation.
+- If continuing fails (e.g. a closed browser tab), the server resends the full
+  history to a new conversation, and logs `[server] Couldn't continue…`.
+- Set `CONVERSATION_REUSE=0` to always start fresh. The cache lives in memory,
+  so restarting the server starts new conversations.
+
+### Token usage
+
+M365 Copilot doesn't report token counts, so responses carry an **estimate**
+(about 4 characters per token) in `usage`. `prompt_tokens` estimates the
+whole conversation so far, even when only new messages were sent, so an
+agent's context meter reflects the real context size.
 
 ### Using it from opencode
 
@@ -327,11 +349,11 @@ add a few retries yourself.
 | [copilot/protocol.py](copilot/protocol.py) | SignalR framing, reply parsing, request templating (pure, unit-tested) |
 | [copilot/auth.py](copilot/auth.py) | `session/token.json` load/save and token refresh |
 | [copilot/config.py](copilot/config.py) | URLs, selectors, timeouts (all overridable by env var) |
-| [server/](server/) | The FastAPI OpenAI-compatible server |
+| [server/](server/) | The FastAPI OpenAI-compatible server ([tools.py](server/tools.py): emulated tool calling; [conversations.py](server/conversations.py): conversation reuse) |
 | [examples/](examples/) | Runnable examples |
 | [tests/](tests/) | Unit tests, the diagnostic capture tool, stress and rate-limit probes |
 
-Run the offline tests with `python -m unittest tests.test_protocol tests.test_server tests.test_tools` (needs `pip install httpx` for the server tests).
+Run the offline tests with `python -m unittest tests.test_protocol tests.test_server tests.test_tools tests.test_conversations` (needs `pip install httpx` for the server tests).
 
 ---
 

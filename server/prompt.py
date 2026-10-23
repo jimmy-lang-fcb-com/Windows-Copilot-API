@@ -45,3 +45,12 @@ def messages_to_prompt(messages: List[ChatMessage]) -> str:
     if system and body:
         return f"{system}\n\n{body}"
     return system or body
+
+
+def followup_prompt(messages: List[ChatMessage]) -> str:
+    """Prompt for a continued conversation: just the new (non-system) messages."""
+    new = [m for m in messages if m.role not in ("system", "developer")]
+    if len(new) == 1 and new[0].role == "user":
+        return content_text(new[0].content)
+    lines = [f"{'User' if m.role == 'user' else 'Assistant'}: {content_text(m.content)}" for m in new]
+    return "\n".join(lines)

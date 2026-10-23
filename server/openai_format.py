@@ -10,7 +10,21 @@ def new_id() -> str:
     return f"chatcmpl-{uuid.uuid4().hex}"
 
 
-def completion_response(text: str, model: str, conversation_id=None, tool_calls=None) -> dict:
+def estimate_tokens(text: str) -> int:
+    """Rough token count (~4 characters per token). M365 Copilot reports none."""
+    return (len(text) + 3) // 4
+
+
+def usage(prompt_tokens: int, completion_tokens: int) -> dict:
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+
+
+def completion_response(text: str, model: str, conversation_id=None, tool_calls=None,
+                        usage_info=None) -> dict:
     """A non-streaming ``chat.completion`` object.
 
     ``conversation_id`` is Copilot's own conversation id, surfaced as an extra
@@ -33,7 +47,7 @@ def completion_response(text: str, model: str, conversation_id=None, tool_calls=
                 "finish_reason": "tool_calls" if tool_calls else "stop",
             }
         ],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "usage": usage_info or usage(0, 0),
     }
 
 
@@ -51,7 +65,8 @@ def sse_event(payload: dict) -> str:
 
 
 def stream_chunk(
-    cid: str, created: int, model: str, delta: dict, finish=None, conversation_id=None
+    cid: str, created: int, model: str, delta: dict, finish=None, conversation_id=None,
+    usage_info=None,
 ) -> dict:
     """A single ``chat.completion.chunk`` object for streaming responses.
 
@@ -68,4 +83,6 @@ def stream_chunk(
     }
     if conversation_id is not None:
         chunk["conversation_id"] = conversation_id
+    if usage_info is not None:
+        chunk["usage"] = usage_info
     return chunk

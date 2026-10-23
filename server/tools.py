@@ -151,10 +151,7 @@ def build_prompt(
     tool_section = _INSTRUCTIONS + "\n" + "\n".join(describe_tool(t) for t in tools)
     tool_section += _choice_rule(tool_choice)
 
-    call_names = {}
-    for m in messages:
-        for c in m.tool_calls or []:
-            call_names[c.get("id", "")] = (c.get("function") or {}).get("name", "tool")
+    call_names = _call_names(messages)
     history = [_render_message(m, call_names) for m in messages
                if m.role not in ("system", "developer")]
 
@@ -168,6 +165,31 @@ def build_prompt(
         history = ["[Earlier conversation omitted to fit the length limit.]"] + history[2:]
         prompt = assemble(history)
     return prompt
+
+
+def _call_names(messages: List[ChatMessage]) -> Dict[str, str]:
+    """tool_call_id -> tool name, so results can be labeled."""
+    names = {}
+    for m in messages:
+        for c in m.tool_calls or []:
+            names[c.get("id", "")] = (c.get("function") or {}).get("name", "tool")
+    return names
+
+
+def build_followup(messages: List[ChatMessage], start: int, tools: List[Dict[str, Any]],
+                   tool_choice: Any = None) -> str:
+    """Prompt for a *continued* M365 conversation: only ``messages[start:]``.
+
+    The tool instructions were sent at the start of the conversation, so this
+    only repeats a one-line reminder with the tool names.
+    """
+    call_names = _call_names(messages)
+    parts = [_render_message(m, call_names) for m in messages[start:]
+             if m.role not in ("system", "developer")]
+    names = ", ".join((t.get("function", t) or {}).get("name", "") for t in tools)
+    return ("\n\n".join(parts) + _choice_rule(tool_choice)
+            + f"\n\n(Tools available: {names}. To use one, reply only with <tool_call> blocks. "
+              "Otherwise, answer directly.)")
 
 
 def correction_prompt(error: str) -> str:
